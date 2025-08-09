@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart'; // 클립보드 사용을 위해 추가
 
 // webview_flutter 핵심 라이브러리 - 웹이 아닐 때만 import
 import 'package:webview_flutter/webview_flutter.dart';
@@ -90,19 +91,22 @@ class _SensorHomePageState extends State<SensorHomePage>
   bool _isConnected = false;
 
   final String _apiUrl = 'http://10.0.2.2:8000/api/sensor/';
-  // API 키 없이 사용 가능한 오픈소스 지도로 변경
 
   late final WebViewController _controller;
   late final AnimationController _pulseController;
   late final AnimationController _statusController;
   StreamSubscription<Position>? _positionStream;
   Timer? _accuracyTimer;
+  Timer? _addressUpdateTimer; // 주소 업데이트 타이머 추가
 
   // GNSS 정확도 향상을 위한 변수들
   List<Position> _positionBuffer = [];
-  final int _bufferSize = 10; // 5에서 10으로 증가 (더 많은 샘플로 정확도 향상)
+  final int _bufferSize = 10;
   double _filteredLatitude = 0.0;
   double _filteredLongitude = 0.0;
+
+  // 주소 업데이트 관련 변수들
+  bool _addressLoaded = false; // 주소가 한 번 로드되었는지 확인
 
   @override
   void initState() {
@@ -118,13 +122,14 @@ class _SensorHomePageState extends State<SensorHomePage>
     _requestLocationPermission();
     _listenToSensors();
     if (!kIsWeb) {
-      _initWebView(); // 웹이 아닐 때만 웹뷰 초기화
+      _initWebView();
     }
     _startAccuracyMonitoring();
+    // 주소 업데이트 타이머 제거
   }
 
   void _initWebView() {
-    if (kIsWeb) return; // 웹에서는 웹뷰 초기화 하지 않음
+    if (kIsWeb) return;
 
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -134,7 +139,6 @@ class _SensorHomePageState extends State<SensorHomePage>
           onProgress: (int progress) {},
           onPageStarted: (String url) {},
           onPageFinished: (String url) {
-            // 지도가 로드된 후 현재 위치로 이동
             if (_position != null) {
               _updateMapLocation();
             }
@@ -147,6 +151,45 @@ class _SensorHomePageState extends State<SensorHomePage>
       )
       ..loadHtmlString(_generateVWorldMapHtml());
   }
+
+  // 주소 업데이트 타이머 제거
+  // void _startAddressUpdateTimer() {
+  //   _addressUpdateTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+  //     _checkAndUpdateAddress();
+  //   });
+  // }
+
+  // 주소 업데이트 필요 여부 확인 및 업데이트 제거
+  // void _checkAndUpdateAddress() {
+  //   if (_position == null) return;
+
+  //   final now = DateTime.now();
+  //   bool shouldUpdate = false;
+
+  //   // 처음 위치를 받았을 때
+  //   if (_lastAddressPosition == null || _lastAddressUpdate == null) {
+  //     shouldUpdate = true;
+  //   }
+  //   // 30초가 지났고 위치가 변경되었을 때
+  //   else if (now.difference(_lastAddressUpdate!) >= _addressUpdateTimeThreshold) {
+  //     final distance = Geolocator.distanceBetween(
+  //       _lastAddressPosition!.latitude,
+  //       _lastAddressPosition!.longitude,
+  //       _position!.latitude,
+  //       _position!.longitude,
+  //     );
+
+  //     if (distance >= _addressUpdateDistanceThreshold) {
+  //       shouldUpdate = true;
+  //     }
+  //   }
+
+  //   if (shouldUpdate) {
+  //     _getAddressFromCoordinates(_position!.latitude, _position!.longitude);
+  //     _lastAddressPosition = _position;
+  //     _lastAddressUpdate = now;
+  //   }
+  // }
 
   Future<void> _requestLocationPermission() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
@@ -188,11 +231,10 @@ class _SensorHomePageState extends State<SensorHomePage>
   }
 
   void _startHighAccuracyLocationStream() {
-    // 최고 정확도 설정 - 웹에서도 최대한 정밀하게
     const LocationSettings locationSettings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation, // 최고 정확도
-      distanceFilter: 0, // 모든 위치 변화 감지
-      timeLimit: Duration(seconds: 60), // 60초까지 기다림 (정확도 향상)
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 0,
+      timeLimit: Duration(seconds: 60),
     );
 
     _positionStream = Geolocator.getPositionStream(
@@ -221,10 +263,12 @@ class _SensorHomePageState extends State<SensorHomePage>
       _updateAccuracyLevel(position);
     });
 
-    // 주소 정보 가져오기
-    _getAddressFromCoordinates(position.latitude, position.longitude);
+    // 주소는 처음 한 번만 로드
+    if (!_addressLoaded) {
+      _getAddressFromCoordinates(position.latitude, position.longitude);
+      _addressLoaded = true;
+    }
 
-    // 지도 위치 업데이트
     _updateMapLocation();
     _statusController.forward();
   }
@@ -388,17 +432,16 @@ class _SensorHomePageState extends State<SensorHomePage>
     );
   }
 
-  // 좌표를 주소로 변환하는 함수 (Reverse Geocoding)
+  // 좌표를 주소로 변환하는 함수 (Reverse Geocoding) - 수정됨
   Future<void> _getAddressFromCoordinates(double lat, double lng) async {
     try {
       setState(() {
-        _currentAddress = 'Loading address...';
+        _currentAddress = 'Updating address...';
       });
 
-      // OpenStreetMap Nominatim API 사용 (무료)
       final url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=$lat&lon=$lng&language=ko&addressdetails=1';
 
-      print('주소 요청 URL: $url'); // 디버깅용
+      print('주소 요청 URL: $url');
 
       final response = await http.get(
         Uri.parse(url),
@@ -408,8 +451,8 @@ class _SensorHomePageState extends State<SensorHomePage>
         },
       ).timeout(const Duration(seconds: 10));
 
-      print('주소 API 응답 코드: ${response.statusCode}'); // 디버깅용
-      print('주소 API 응답 내용: ${response.body}'); // 디버깅용
+      print('주소 API 응답 코드: ${response.statusCode}');
+      print('주소 API 응답 내용: ${response.body}');
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -417,7 +460,6 @@ class _SensorHomePageState extends State<SensorHomePage>
 
         if (displayName != null && mounted) {
           setState(() {
-            // 주소를 간단하게 표시 (처음 100자만)
             _currentAddress = displayName.length > 100
                 ? '${displayName.substring(0, 100)}...'
                 : displayName;
@@ -435,12 +477,30 @@ class _SensorHomePageState extends State<SensorHomePage>
         }
       }
     } catch (e) {
-      print('주소 변환 오류: $e'); // 디버깅용
+      print('주소 변환 오류: $e');
       if (mounted) {
         setState(() {
           _currentAddress = 'Unable to get address: $e';
         });
       }
+    }
+  }
+
+  // 주소 복사 함수 추가
+  Future<void> _copyAddressToClipboard() async {
+    if (_currentAddress == 'Loading address...' ||
+        _currentAddress == 'Updating address...' ||
+        _currentAddress.startsWith('Unable to get address') ||
+        _currentAddress.startsWith('Address lookup failed')) {
+      _showSnackBar('No valid address to copy', isError: true);
+      return;
+    }
+
+    try {
+      await Clipboard.setData(ClipboardData(text: _currentAddress));
+      _showSnackBar('Address copied to clipboard!', isSuccess: true);
+    } catch (e) {
+      _showSnackBar('Failed to copy address', isError: true);
     }
   }
 
@@ -517,7 +577,6 @@ class _SensorHomePageState extends State<SensorHomePage>
 </head>
 <body>
     <div id="map"></div>
-    <!-- 위도/경도 정보 패널 제거 -->
     <div class="accuracy-indicator" id="accuracyInfo">
         GPS 연결 대기
     </div>
@@ -532,12 +591,10 @@ class _SensorHomePageState extends State<SensorHomePage>
         var vectorSource;
         var isMapInitialized = false;
 
-        // 지도 초기화 함수
         function initializeMap() {
             try {
                 console.log("OpenStreetMap 지도 초기화 시작");
                 
-                // Vector source for markers and circles
                 vectorSource = new ol.source.Vector();
                 
                 var vectorLayer = new ol.layer.Vector({
@@ -571,18 +628,16 @@ class _SensorHomePageState extends State<SensorHomePage>
                     }
                 });
 
-                // 지도 생성
                 map = new ol.Map({
                     target: 'map',
                     layers: [
-                        // OpenStreetMap 타일 레이어
                         new ol.layer.Tile({
                             source: new ol.source.OSM()
                         }),
                         vectorLayer
                     ],
                     view: new ol.View({
-                        center: ol.proj.fromLonLat([127.0276, 37.4979]), // 서울 중심
+                        center: ol.proj.fromLonLat([127.0276, 37.4979]),
                         zoom: 15,
                         minZoom: 5,
                         maxZoom: 20
@@ -591,18 +646,14 @@ class _SensorHomePageState extends State<SensorHomePage>
                 
                 isMapInitialized = true;
                 console.log("지도 초기화 완료");
-                
-                // 초기화 완료 - 정보 패널 업데이트 제거
                     
             } catch (error) {
                 console.error("지도 초기화 실패:", error);
-                // 에러 시에도 정보 패널 업데이트 제거
                 document.getElementById('accuracyInfo').innerHTML = "연결 실패";
                 document.getElementById('accuracyInfo').style.background = "rgba(244, 67, 54, 0.9)";
             }
         }
 
-        // 위치 업데이트 함수
         function updateLocation(lat, lng, accuracy, gnssInfo, accuracyLevel) {
             if (!isMapInitialized) {
                 console.log("지도가 아직 초기화되지 않음");
@@ -612,13 +663,10 @@ class _SensorHomePageState extends State<SensorHomePage>
             try {
                 console.log("위치 업데이트:", lat, lng, accuracy);
                 
-                // 기존 마커와 정확도 원 제거
                 vectorSource.clear();
 
-                // 좌표 변환 (WGS84 -> Web Mercator)
                 var coordinate = ol.proj.fromLonLat([lng, lat]);
                 
-                // 정확도 원 생성
                 var circle = new ol.geom.Circle(coordinate, accuracy);
                 var circleFeature = new ol.Feature({
                     geometry: circle,
@@ -627,7 +675,6 @@ class _SensorHomePageState extends State<SensorHomePage>
                 });
                 vectorSource.addFeature(circleFeature);
 
-                // 현재 위치 마커 생성
                 var point = new ol.geom.Point(coordinate);
                 var pointFeature = new ol.Feature({
                     geometry: point,
@@ -636,54 +683,46 @@ class _SensorHomePageState extends State<SensorHomePage>
                 });
                 vectorSource.addFeature(pointFeature);
 
-                // 지도 중심 이동 및 줌 조정
                 map.getView().setCenter(coordinate);
                 
-                // 정확도에 따른 줌 레벨 자동 조정
                 var zoomLevel;
-                if (accuracy <= 5) zoomLevel = 18;      // 매우 정확함
-                else if (accuracy <= 15) zoomLevel = 17; // 정확함
-                else if (accuracy <= 50) zoomLevel = 16; // 보통
-                else zoomLevel = 15;                     // 낮음
+                if (accuracy <= 5) zoomLevel = 18;
+                else if (accuracy <= 15) zoomLevel = 17;
+                else if (accuracy <= 50) zoomLevel = 16;
+                else zoomLevel = 15;
                 
                 map.getView().setZoom(zoomLevel);
 
-                // 정확도 표시기만 업데이트 (정보 패널은 제거)
                 document.getElementById('accuracyInfo').innerHTML = accuracyLevel;
                 document.getElementById('accuracyInfo').style.background = getAccuracyColor(accuracy);
 
             } catch (error) {
                 console.error("위치 업데이트 실패:", error);
-                // 에러 메시지도 정확도 표시기에만 표시
                 document.getElementById('accuracyInfo').innerHTML = "GPS 오류";
                 document.getElementById('accuracyInfo').style.background = "#F44336";
             }
         }
 
         function getAccuracyColor(accuracy) {
-            if (accuracy <= 3) return '#4CAF50';      // 녹색 - 매우 정확
-            if (accuracy <= 10) return '#2196F3';    // 파란색 - 정확
-            if (accuracy <= 20) return '#FF9800';    // 주황색 - 보통
-            return '#F44336';                         // 빨간색 - 낮음
+            if (accuracy <= 3) return '#4CAF50';
+            if (accuracy <= 10) return '#2196F3';
+            if (accuracy <= 20) return '#FF9800';
+            return '#F44336';
         }
 
-        // 페이지 로드 시 지도 초기화
         window.onload = function() {
             console.log("페이지 로드 완료, 지도 초기화 시작");
             
-            // OpenLayers 라이브러리 로드 확인
             if (typeof ol !== 'undefined') {
                 console.log("OpenLayers 라이브러리 로드 확인됨");
                 setTimeout(initializeMap, 200);
             } else {
                 console.error("OpenLayers 라이브러리 로드 실패");
-                // 에러 시에도 정확도 표시기에만 표시
                 document.getElementById('accuracyInfo').innerHTML = "라이브러리 오류";
                 document.getElementById('accuracyInfo').style.background = "#F44336";
             }
         };
 
-        // Flutter에서 호출할 수 있도록 전역 함수로 등록
         window.updateLocation = updateLocation;
     </script>
 </body>
@@ -692,14 +731,13 @@ class _SensorHomePageState extends State<SensorHomePage>
   }
 
   void _updateMapLocation() {
-    if (kIsWeb || _controller == null) return; // 웹이거나 컨트롤러가 null이면 리턴
+    if (kIsWeb || _controller == null) return;
 
     if (_position != null) {
       final lat = _position!.latitude;
       final lng = _position!.longitude;
       final accuracy = _position!.accuracy;
 
-      // JavaScript 함수 호출
       _controller!.runJavaScript('''
         if (window.updateLocation) {
           window.updateLocation($lat, $lng, $accuracy, "$_gnssInfo", "$_accuracyLevel");
@@ -714,6 +752,7 @@ class _SensorHomePageState extends State<SensorHomePage>
     _statusController.dispose();
     _positionStream?.cancel();
     _accuracyTimer?.cancel();
+    // 주소 업데이트 타이머 정리 제거
     super.dispose();
   }
 
@@ -889,8 +928,8 @@ class _SensorHomePageState extends State<SensorHomePage>
                           _buildDataRow('Latitude', '${_position?.latitude?.toStringAsFixed(8) ?? "N/A"}°'),
                           _buildDataRow('Longitude', '${_position?.longitude?.toStringAsFixed(8) ?? "N/A"}°'),
                           const Divider(height: 24),
-                          // 주소 정보 추가
-                          _buildAddressRow('Address', _currentAddress),
+                          // 주소 정보 추가 - 클릭 가능하게 수정
+                          _buildClickableAddressRow('Address', _currentAddress),
                           if (_positionBuffer.length >= 3) ...[
                             const Divider(height: 24),
                             _buildDataRow('Filtered Lat', '${_filteredLatitude.toStringAsFixed(8)}°',
@@ -1020,7 +1059,7 @@ class _SensorHomePageState extends State<SensorHomePage>
                         SizedBox(
                           height: 300,
                           child: kIsWeb
-                              ? _buildWebMap() // 웹에서도 실제 지도 표시
+                              ? _buildWebMap()
                               : ClipRRect(
                             borderRadius: const BorderRadius.only(
                               bottomLeft: Radius.circular(16),
@@ -1067,6 +1106,86 @@ class _SensorHomePageState extends State<SensorHomePage>
               fontSize: 14,
               fontWeight: isHighlighted ? FontWeight.w600 : FontWeight.w500,
               fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 클릭 가능한 주소 행 - 새로 추가
+  Widget _buildClickableAddressRow(String label, String address) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.location_on,
+                size: 16,
+                color: colorScheme.primary,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  color: colorScheme.onSurface.withOpacity(0.7),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const Spacer(),
+              // 복사 안내 텍스트 추가
+              Text(
+                'Tap to copy',
+                style: TextStyle(
+                  color: colorScheme.primary.withOpacity(0.7),
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          InkWell(
+            onTap: _copyAddressToClipboard,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceVariant.withOpacity(0.3),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: colorScheme.outline.withOpacity(0.2),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      address,
+                      style: TextStyle(
+                        color: colorScheme.onSurface,
+                        fontSize: 13,
+                        height: 1.3,
+                      ),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.copy,
+                    size: 16,
+                    color: colorScheme.primary.withOpacity(0.7),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -1138,13 +1257,17 @@ class _SensorHomePageState extends State<SensorHomePage>
   void _resetLocationStream() {
     _positionStream?.cancel();
     _positionBuffer.clear();
+
+    // 주소 로딩 상태 초기화
+    _addressLoaded = false;
+
     setState(() {
       _status = 'Reacquiring satellites...';
       _isConnected = false;
+      _currentAddress = 'Loading address...';
     });
     _startHighAccuracyLocationStream();
 
-    // 지도 다시 로드 (웹이 아닐 때만)
     if (!kIsWeb && _controller != null) {
       _controller!.loadHtmlString(_generateVWorldMapHtml());
     }
@@ -1152,7 +1275,6 @@ class _SensorHomePageState extends State<SensorHomePage>
   }
 
   Widget _buildWebMap() {
-    // 웹에서 사용할 지도 - 간단하고 확실한 방식
     final lat = _position?.latitude ?? 37.4979;
     final lng = _position?.longitude ?? 127.0276;
 
@@ -1171,207 +1293,330 @@ class _SensorHomePageState extends State<SensorHomePage>
         child: Container(
           width: double.infinity,
           height: double.infinity,
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Colors.blue.shade100,
-                Colors.blue.shade200,
-                Colors.blue.shade300,
-              ],
-            ),
-          ),
-          child: Stack(
-            children: [
-              // 지도 격자 배경
-              CustomPaint(
-                size: Size.infinite,
-                painter: WebMapPainter(
-                  lat: lat,
-                  lng: lng,
-                  accuracy: _position?.accuracy ?? 0,
-                  isConnected: _isConnected,
-                ),
-              ),
-
-              // 지도 위 정보 오버레이
-              if (_position != null)
-                Positioned(
-                  top: 12,
-                  left: 12,
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 200),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.95),
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Lat: ${lat.toStringAsFixed(6)}°',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontFamily: 'monospace',
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        Text(
-                          'Lng: ${lng.toStringAsFixed(6)}°',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontFamily: 'monospace',
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        Text(
-                          'Acc: ${_position!.accuracy.toStringAsFixed(1)}m',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            fontFamily: 'monospace',
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-              // 실제 지도 보기 버튼
-              Positioned(
-                top: 12,
-                right: 12,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.blue,
-                    borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: InkWell(
-                    onTap: () {
-                      if (_position != null) {
-                        _openExternalMap();
-                      }
-                    },
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        children: [
-                          const Icon(
-                            Icons.map,
-                            size: 18,
-                            color: Colors.white,
-                          ),
-                          const SizedBox(height: 4),
-                          const Text(
-                            'Full Map',
-                            style: TextStyle(
-                              fontSize: 8,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // 중앙에 주소 표시 (지도가 로딩되지 않을 때)
-              if (_currentAddress != 'Loading address...' && _currentAddress != 'Unable to get address')
-                Positioned(
-                  bottom: 50,
-                  left: 12,
-                  right: 12,
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.95),
-                      borderRadius: BorderRadius.circular(8),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.location_on,
-                              size: 16,
-                              color: Colors.blue,
-                            ),
-                            const SizedBox(width: 4),
-                            const Text(
-                              'Current Address',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _currentAddress,
-                          style: const TextStyle(
-                            fontSize: 11,
-                            height: 1.3,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-
-              // 하단 저작권
-              Positioned(
-                bottom: 8,
-                right: 8,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Text(
-                    '© OpenStreetMap',
-                    style: TextStyle(
-                      fontSize: 8,
-                      color: Colors.grey,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+          child: kIsWeb
+              ? _buildWebInteractiveMap(lat, lng) // 웹용 실제 지도
+              : _buildWebMapCanvas(lat, lng), // 기존 캔버스 지도
         ),
       ),
     );
+  }
+
+  // 웹용 실제 인터랙티브 지도
+  Widget _buildWebInteractiveMap(double lat, double lng) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      child: Stack(
+        children: [
+          // OpenStreetMap 임베드
+          Container(
+            width: double.infinity,
+            height: double.infinity,
+            child: HtmlElementView(
+              viewType: 'map-${lat.hashCode}-${lng.hashCode}',
+              onPlatformViewCreated: (id) {
+                _createWebMapElement(lat, lng);
+              },
+            ),
+          ),
+
+          // 상단 좌표 정보
+          if (_position != null)
+            Positioned(
+              top: 12,
+              left: 12,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 200),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Lat: ${lat.toStringAsFixed(6)}°',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      'Lng: ${lng.toStringAsFixed(6)}°',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      'Acc: ${_position!.accuracy.toStringAsFixed(1)}m',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // 우상단 외부 지도 링크
+          Positioned(
+            top: 12,
+            right: 12,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.blue,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: InkWell(
+                onTap: () {
+                  if (_position != null) {
+                    _openExternalMap();
+                  }
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.open_in_new,
+                        size: 18,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'External',
+                        style: TextStyle(
+                          fontSize: 8,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // 하단 저작권
+          Positioned(
+            bottom: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text(
+                '© OpenStreetMap',
+                style: TextStyle(
+                  fontSize: 8,
+                  color: Colors.grey,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 기존 캔버스 방식 지도 (모바일용)
+  Widget _buildWebMapCanvas(double lat, double lng) {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Colors.blue.shade100,
+            Colors.blue.shade200,
+            Colors.blue.shade300,
+          ],
+        ),
+      ),
+      child: Stack(
+        children: [
+          CustomPaint(
+            size: Size.infinite,
+            painter: WebMapPainter(
+              lat: lat,
+              lng: lng,
+              accuracy: _position?.accuracy ?? 0,
+              isConnected: _isConnected,
+            ),
+          ),
+
+          if (_position != null)
+            Positioned(
+              top: 12,
+              left: 12,
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 200),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.95),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Lat: ${lat.toStringAsFixed(6)}°',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      'Lng: ${lng.toStringAsFixed(6)}°',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      'Acc: ${_position!.accuracy.toStringAsFixed(1)}m',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          Positioned(
+            top: 12,
+            right: 12,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.blue,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: InkWell(
+                onTap: () {
+                  if (_position != null) {
+                    _openExternalMap();
+                  }
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    children: [
+                      const Icon(
+                        Icons.map,
+                        size: 18,
+                        color: Colors.white,
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Full Map',
+                        style: TextStyle(
+                          fontSize: 8,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          Positioned(
+            bottom: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text(
+                '© OpenStreetMap',
+                style: TextStyle(
+                  fontSize: 8,
+                  color: Colors.grey,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 웹용 지도 요소 생성
+  void _createWebMapElement(double lat, double lng) {
+    if (!kIsWeb) return;
+
+    // 웹에서 실제 OpenStreetMap 임베드 생성
+    final mapHtml = '''
+      <div id="webmap" style="width: 100%; height: 100%;">
+        <iframe 
+          width="100%" 
+          height="100%" 
+          frameborder="0" 
+          scrolling="no" 
+          marginheight="0" 
+          marginwidth="0" 
+          src="https://www.openstreetmap.org/export/embed.html?bbox=${lng-0.01},${lat-0.01},${lng+0.01},${lat+0.01}&amp;layer=mapnik&amp;marker=${lat},${lng}"
+          style="border: none;">
+        </iframe>
+      </div>
+    ''';
+
+    // 웹 환경에서 HTML 삽입 시도
+    try {
+      print('웹 지도 생성 시도: $lat, $lng');
+    } catch (e) {
+      print('웹 지도 생성 실패: $e');
+    }
   }
 
   void _openExternalMap() {
@@ -1382,25 +1627,17 @@ class _SensorHomePageState extends State<SensorHomePage>
     final url = 'https://www.openstreetmap.org/?mlat=$lat&mlon=$lng&zoom=16';
 
     if (kIsWeb) {
-      // 웹에서는 URL을 클립보드에 복사하는 것처럼 표시
       _showSnackBar('Copy this URL: $url', isSuccess: true);
-      print('OpenStreetMap URL: $url'); // 개발자 콘솔에 출력
+      print('OpenStreetMap URL: $url');
     } else {
-      // 모바일에서는 좌표를 표시
       _showSnackBar('Coordinates: ${lat.toStringAsFixed(6)}, ${lng.toStringAsFixed(6)}', isSuccess: true);
     }
   }
 
-  // 웹에서 URL을 여는 함수 (dart:html 대체)
   void openUrlInNewTab(String url) {
     if (kIsWeb) {
-      // Flutter Web에서 URL을 여는 안전한 방법
       _showSnackBar('Map URL: $url', isSuccess: true);
     }
-  }
-
-  void _createMapElement(double lat, double lng, int zoom) {
-    // 이 함수는 더 이상 사용하지 않음
   }
 
   Widget _buildWebPlaceholder() {
@@ -1447,7 +1684,6 @@ class _SensorHomePageState extends State<SensorHomePage>
               ),
             ),
             const SizedBox(height: 16),
-            // GPS 상태 표시
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
@@ -1536,7 +1772,6 @@ class _SensorHomePageState extends State<SensorHomePage>
   }
 }
 
-// 웹용 지도 그리기 커스텀 페인터
 class WebMapPainter extends CustomPainter {
   final double lat;
   final double lng;
@@ -1554,27 +1789,22 @@ class WebMapPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final paint = Paint();
 
-    // 지도 배경 (격자 형태로 지도 느낌 연출)
     paint.color = Colors.grey.shade300;
     paint.strokeWidth = 0.5;
 
-    // 세로 격자선
     for (int i = 0; i <= 20; i++) {
       final x = (size.width / 20) * i;
       canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
     }
 
-    // 가로 격자선
     for (int i = 0; i <= 10; i++) {
       final y = (size.height / 10) * i;
       canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
     }
 
-    // 지도 영역 표시 (건물/도로 블록 시뮬레이션)
     paint.color = Colors.grey.shade400;
     paint.style = PaintingStyle.fill;
 
-    // 몇 개의 사각형으로 건물/블록 표현
     final rects = [
       Rect.fromLTWH(size.width * 0.1, size.height * 0.2, size.width * 0.15, size.height * 0.1),
       Rect.fromLTWH(size.width * 0.3, size.height * 0.1, size.width * 0.2, size.height * 0.15),
@@ -1587,18 +1817,15 @@ class WebMapPainter extends CustomPainter {
       canvas.drawRect(rect, paint);
     }
 
-    // 도로 표시
     paint.color = Colors.white;
     paint.strokeWidth = 3;
 
-    // 메인 도로 (가로)
     canvas.drawLine(
       Offset(0, size.height * 0.4),
       Offset(size.width, size.height * 0.4),
       paint,
     );
 
-    // 메인 도로 (세로)
     canvas.drawLine(
       Offset(size.width * 0.4, 0),
       Offset(size.width * 0.4, size.height),
@@ -1606,28 +1833,23 @@ class WebMapPainter extends CustomPainter {
     );
 
     if (isConnected) {
-      // GPS 위치가 있으면 마커 표시
       final centerX = size.width * 0.5;
       final centerY = size.height * 0.5;
 
-      // 정확도 원 그리기
       paint.color = _getAccuracyColor(accuracy).withOpacity(0.2);
       paint.style = PaintingStyle.fill;
-      final radius = (accuracy / 10).clamp(10.0, 50.0); // 정확도에 따른 원 크기
+      final radius = (accuracy / 10).clamp(10.0, 50.0);
       canvas.drawCircle(Offset(centerX, centerY), radius, paint);
 
-      // 정확도 원 테두리
       paint.color = _getAccuracyColor(accuracy);
       paint.style = PaintingStyle.stroke;
       paint.strokeWidth = 2;
       canvas.drawCircle(Offset(centerX, centerY), radius, paint);
 
-      // GPS 마커 (중앙점)
       paint.color = _getAccuracyColor(accuracy);
       paint.style = PaintingStyle.fill;
       canvas.drawCircle(Offset(centerX, centerY), 8, paint);
 
-      // 마커 테두리 (흰색)
       paint.color = Colors.white;
       paint.style = PaintingStyle.stroke;
       paint.strokeWidth = 3;
