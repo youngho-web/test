@@ -1,0 +1,36 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    tasks.withType(JavaCompile).configureEach {
+        // options.release = 11 // 예시: Java 11로 설정 (필요하다면 이 주석을 해제하고 버전을 맞추세요)
+        // 아래 잘못된 플러그인 선언을 삭제했습니다.
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
+
+buildscript {
+    ext.kotlin_version = '1.9.22' // 예시, Flutter 버전에 맞는 Kotlin 버전 확인
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // AGP 버전을 8.3.0으로 이미 잘 설정하셨습니다.
+        classpath 'com.android.tools.build:gradle:8.6.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
