@@ -2,8 +2,6 @@ name: Build & Deploy Flutter Web to GitHub Pages
 
 on:
   push:
-    branches: [ "master"]   # 사용 중인 브랜치에 맞춰 자동 배포
-  pull—request:
     branches: [ "main" ]
   workflow_dispatch:
 
